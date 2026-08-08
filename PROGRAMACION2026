@@ -1,0 +1,809 @@
+package org.firstinspires.ftc.teamcode;
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.IMU;
+
+import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
+
+@TeleOp(name = "ProgramacionPrueba")
+public class ProgramacionPrueba extends LinearOpMode {
+
+    // =========================================================
+    // MOTORES
+    // =========================================================
+    private DcMotor der;
+    private DcMotor izq;
+    private DcMotor banda;
+    private DcMotor recolectora;
+    private DcMotor lanzadoraArriba;
+    private DcMotor lanzadoraAbajo;
+    private DcMotor escalar;
+
+
+    // =========================================================
+    // IMU
+    // =========================================================
+
+    private IMU imu;
+// =========================================================
+    // CONTROL DE DIRECCION CON IMU
+    // =========================================================
+    private static final double KP_DIRECCION = 0.025;
+    private static final double ZONA_MUERTA_YAW = 1.5;
+
+
+    // =========================================================
+    // PROTECCION CONTRA CABALLITO
+    // =========================================================
+    private static final double PITCH_LIMITE = 12.0;
+    private static final double POTENCIA_SEGURA = 0.40;
+
+
+    // =========================================================
+    // VARIABLES DE LOS MECANISMOS
+    // =========================================================
+    // Recolectora
+    private boolean recolectoraEncendida = false;
+    private boolean recolectoraReversa = false;
+    // Banda
+    private boolean bandaEncendida = false;
+    private boolean bandaReversa = false;
+    // Lanzadora arriba
+    private boolean lanzadoraArribaEncendida = false;
+    // Lanzadora abajo
+    private boolean lanzadoraAbajoEncendida = false;
+    private boolean lanzadoraAbajoReversa = false;
+    // Escalador
+    private boolean escalarEncendido = false;
+    private boolean escalarReversa = false;
+
+    // =========================================================
+    // ESTADO ANTERIOR DE LOS BOTONES
+    // =========================================================
+    private boolean xAnterior = false;
+    private boolean bAnterior = false;
+    private boolean aAnterior = false;
+    private boolean yAnterior = false;
+    private boolean rbAnterior = false;
+    private boolean lbAnterior = false;
+    private boolean dpadUpAnterior = false;
+    private boolean dpadDownAnterior = false;
+    private boolean botonYDriverAnterior = false;
+
+
+    @Override
+    public void runOpMode() {
+        // =====================================================
+        // MAPEO DE HARDWARE
+        // =====================================================
+
+        der = hardwareMap.get(DcMotor.class, "der");
+        izq = hardwareMap.get(DcMotor.class, "izq");
+        banda = hardwareMap.get(DcMotor.class, "banda");
+        recolectora =
+                hardwareMap.get(DcMotor.class, "recolectora");
+        lanzadoraArriba =
+                hardwareMap.get(
+                        DcMotor.class,
+                        "lanzadoraArriba"
+                );
+        lanzadoraAbajo =
+                hardwareMap.get(
+                        DcMotor.class,
+                        "lanzadoraAbajo"
+                );
+        escalar =
+                hardwareMap.get(
+                        DcMotor.class,
+                        "escalar"
+                );
+
+
+        // =====================================================
+        // MAPEO DEL IMU
+        // =====================================================
+
+        imu = hardwareMap.get(IMU.class, "imu");
+
+
+        // =====================================================
+        // ORIENTACION DEL CONTROL HUB
+        // =====================================================
+        RevHubOrientationOnRobot.LogoFacingDirection logoDirection =
+                RevHubOrientationOnRobot.LogoFacingDirection.UP;
+        RevHubOrientationOnRobot.UsbFacingDirection usbDirection =
+                RevHubOrientationOnRobot.UsbFacingDirection.FORWARD;
+
+        RevHubOrientationOnRobot orientationOnRobot =
+                new RevHubOrientationOnRobot(
+                        logoDirection,
+                        usbDirection
+                );
+
+        imu.initialize(
+                new IMU.Parameters(orientationOnRobot)
+        );
+
+        
+        // DIRECCIONES DE LOS MOTORES
+
+        der.setDirection(
+                DcMotor.Direction.REVERSE
+        );
+        izq.setDirection(
+                DcMotor.Direction.FORWARD
+        );
+
+
+        banda.setDirection(
+                DcMotor.Direction.FORWARD
+        );
+
+
+        recolectora.setDirection(
+                DcMotor.Direction.FORWARD
+        );
+
+
+        lanzadoraArriba.setDirection(
+                DcMotor.Direction.FORWARD
+        );
+        lanzadoraAbajo.setDirection(
+                DcMotor.Direction.FORWARD
+        );
+        escalar.setDirection(
+                DcMotor.Direction.FORWARD
+        );
+
+
+
+        // BRAKE
+
+        der.setZeroPowerBehavior(
+                DcMotor.ZeroPowerBehavior.BRAKE
+        );
+
+        izq.setZeroPowerBehavior(
+                DcMotor.ZeroPowerBehavior.BRAKE
+        );
+
+        banda.setZeroPowerBehavior(
+                DcMotor.ZeroPowerBehavior.BRAKE
+        );
+
+        recolectora.setZeroPowerBehavior(
+                DcMotor.ZeroPowerBehavior.BRAKE
+        );
+
+        lanzadoraArriba.setZeroPowerBehavior(
+                DcMotor.ZeroPowerBehavior.BRAKE
+        );
+
+        lanzadoraAbajo.setZeroPowerBehavior(
+                DcMotor.ZeroPowerBehavior.BRAKE
+        );
+
+        escalar.setZeroPowerBehavior(
+                DcMotor.ZeroPowerBehavior.BRAKE
+        );
+
+
+       
+        // mensaje INcial
+        
+        telemetry.addLine("==============================");
+        telemetry.addLine("       ROBOT LISTO");
+        telemetry.addLine("==============================");
+        telemetry.addLine("");
+        telemetry.addLine("GAMEPAD 1 = DRIVE TRAIN");
+        telemetry.addLine("GAMEPAD 2 = MECANISMOS");
+        telemetry.addLine("");
+        telemetry.addLine("Presiona START");
+        telemetry.update();
+        waitForStart();
+
+        // =====================================================
+        // REINICIAR IMU
+        // =====================================================
+        imu.resetYaw();
+
+        // =====================================================
+        // LOOP PRINCIPAL
+        // =====================================================
+        while (opModeIsActive()) {
+            // =================================================
+            // LEER IMU
+            // =================================================
+            YawPitchRollAngles orientacion =
+                    imu.getRobotYawPitchRollAngles();
+            double yaw =
+                    orientacion.getYaw(
+                            AngleUnit.DEGREES
+                    );
+            double pitch =
+                    orientacion.getPitch(
+                            AngleUnit.DEGREES
+                    );
+            double roll =
+                    orientacion.getRoll(
+                            AngleUnit.DEGREES
+                    );
+
+            // =================================================
+            // RESET DEL YAW
+            if (gamepad1.y &&
+                    !botonYDriverAnterior) {
+
+                imu.resetYaw();
+
+            }
+
+            botonYDriverAnterior =
+                    gamepad1.y;
+            
+            // GAMEPAD 1
+            // Drive train, maneja solo el movimiento
+        
+            double adelante =
+                    -gamepad1.left_stick_y;
+
+            double giro =
+                    gamepad1.right_stick_x;
+
+
+            // =================================================
+            // CORRECCION DE DIRECCION CON IMU
+            // =================================================
+            double correccionDireccion = 0;
+            /*
+             * Solo correge
+             *
+             * 1. El robot está avanzando/retrocediendo.
+             * 2. El Driver no está girando manualmente.
+             */
+
+            if (Math.abs(adelante) > 0.15 &&
+                    Math.abs(giro) < 0.10) {
+
+                double errorYaw = -yaw;
+
+
+                if (Math.abs(errorYaw) >
+                        ZONA_MUERTA_YAW) {
+
+                    correccionDireccion =
+                            errorYaw * KP_DIRECCION;
+                }
+            }
+
+
+            // =================================================
+            // PROTECCION CONTRA CABALLITO
+            // =================================================
+
+            double potenciaAvance =
+                    adelante;
+
+            /*
+             * Si el robot se inclina demasiado hacia atrás,
+             * reducimos la potencia de avance.
+             */
+            if (pitch > PITCH_LIMITE &&
+                    adelante > 0) {
+
+                potenciaAvance =
+                        Math.min(
+                                adelante,
+                                POTENCIA_SEGURA
+                        );
+            }
+
+            // POTENCIAS DEL DRIVE TRAIN
+            double potenciaIzq =
+                    potenciaAvance
+                    + giro
+                    + correccionDireccion;
+            double potenciaDer =
+                    potenciaAvance
+                    - giro
+                    - correccionDireccion;
+            // =================================================
+            // LIMITAR POTENCIA
+            // =================================================
+            potenciaIzq =
+                    Math.max(
+                            -1.0,
+                            Math.min(
+                                    1.0,
+                                    potenciaIzq
+                            )
+                    );
+            potenciaDer =
+                    Math.max(
+                            -1.0,
+                            Math.min(
+                                    1.0,
+                                    potenciaDer
+                            )
+                    );
+            // =================================================
+            // MOVER DRIVE TRAIN
+            // =================================================
+
+            izq.setPower(
+                    potenciaIzq
+            );
+
+            der.setPower(
+                    potenciaDer
+            );
+
+            // RECOLECTORA=====
+            /*
+             * X:
+             *
+             * Primera pulsación:
+             * enciende recolectora hacia adelante.
+             *
+             * Segunda pulsación:
+             * la apaga.
+             */
+
+            if (gamepad2.x &&
+                    !xAnterior) {
+
+                if (!recolectoraEncendida) {
+
+                    recolectoraEncendida = true;
+                    recolectoraReversa = false;
+
+                }
+                else {
+
+                    recolectoraEncendida = false;
+                }
+            }
+
+
+            /*
+             * B:
+             *
+             * Primera pulsación:
+             * recolectora en reversa.
+             *
+             * Segunda pulsación:
+             * se apaga.
+             */
+
+            if (gamepad2.b &&
+                    !bAnterior) {
+
+                if (!recolectoraEncendida ||
+                        !recolectoraReversa) {
+
+                    recolectoraEncendida = true;
+                    recolectoraReversa = true;
+
+                }
+                else {
+
+                    recolectoraEncendida = false;
+                }
+            }
+
+            xAnterior = gamepad2.x;
+            bAnterior = gamepad2.b;
+
+            if (recolectoraEncendida) {
+
+                if (recolectoraReversa) {
+
+                    recolectora.setPower(-1.0);
+
+                }
+                else {
+
+                    recolectora.setPower(1.0);
+                }
+
+            }
+            else {
+
+                recolectora.setPower(0.0);
+            }
+            // =================================================
+            // BANDA TRANSPORTADORA
+            // =================================================
+            /*
+             * A = banda hacia adelante.
+             */
+
+            if (gamepad2.a &&
+                    !aAnterior) {
+
+                if (!bandaEncendida) {
+
+                    bandaEncendida = true;
+                    bandaReversa = false;
+
+                }
+                else {
+
+                    bandaEncendida = false;
+                }
+            }
+
+
+            /*
+             * Y = banda en reversa.
+             */
+
+            if (gamepad2.y &&
+                    !yAnterior) {
+
+                if (!bandaEncendida ||
+                        !bandaReversa) {
+
+                    bandaEncendida = true;
+                    bandaReversa = true;
+
+                }
+                else {
+
+                    bandaEncendida = false;
+                }
+            }
+
+
+            aAnterior = gamepad2.a;
+            yAnterior = gamepad2.y;
+
+
+            if (bandaEncendida) {
+
+                if (bandaReversa) {
+
+                    banda.setPower(-1.0);
+
+                }
+                else {
+
+                    banda.setPower(1.0);
+                }
+
+            }
+            else {
+
+                banda.setPower(0.0);
+            }
+
+
+            // =================================================
+            // LANZADORA ARRIBA
+            // =================================================
+
+            /*
+             * R1 = ENCENDER / APAGAR
+             *
+             * SOLO gira hacia adelante.
+             *
+             * No le puse reversa al motor ya que no sera necesario 
+             */
+
+            if (gamepad2.right_bumper &&
+                    !rbAnterior) {
+
+                lanzadoraArribaEncendida =
+                        !lanzadoraArribaEncendida;
+            }
+
+
+            rbAnterior =
+                    gamepad2.right_bumper;
+
+
+            if (lanzadoraArribaEncendida) {
+
+                lanzadoraArriba.setPower(1.0);
+
+            }
+            else {
+
+                lanzadoraArriba.setPower(0.0);
+            }
+
+
+            // =================================================
+            // LANZADORA ABAJO
+            // =================================================
+
+            /*
+             * L1 = adelante
+             *
+             * L2 = reversa
+             *
+             * Cada botón funciona como toggle.
+             */
+
+            if (gamepad2.left_bumper &&
+                    !lbAnterior) {
+
+                if (!lanzadoraAbajoEncendida) {
+
+                    lanzadoraAbajoEncendida = true;
+                    lanzadoraAbajoReversa = false;
+
+                }
+                else {
+
+                    lanzadoraAbajoEncendida = false;
+                }
+            }
+
+
+            if (gamepad2.left_trigger > 0.5 &&
+                    !lbTriggerAnterior) {
+
+                if (!lanzadoraAbajoEncendida ||
+                        !lanzadoraAbajoReversa) {
+
+                    lanzadoraAbajoEncendida = true;
+                    lanzadoraAbajoReversa = true;
+
+                }
+                else {
+
+                    lanzadoraAbajoEncendida = false;
+                }
+            }
+
+
+            lbAnterior =
+                    gamepad2.left_bumper;
+
+            lbTriggerAnterior =
+                    gamepad2.left_trigger > 0.5;
+
+
+            if (lanzadoraAbajoEncendida) {
+
+                if (lanzadoraAbajoReversa) {
+
+                    lanzadoraAbajo.setPower(-1.0);
+
+                }
+                else {
+
+                    lanzadoraAbajo.setPower(1.0);
+                }
+
+            }
+            else {
+
+                lanzadoraAbajo.setPower(0.0);
+            }
+
+
+            // =================================================
+            // ESCALADOR
+            // =================================================
+
+            /*
+             * D-PAD ARRIBA:
+             *
+             * Primera pulsación:
+             * empieza a subir.
+             *
+             * Segunda pulsación:
+             * se detiene.
+             */
+
+            if (gamepad2.dpad_up &&
+                    !dpadUpAnterior) {
+
+                if (!escalarEncendido) {
+
+                    escalarEncendido = true;
+                    escalarReversa = false;
+
+                }
+                else {
+
+                    escalarEncendido = false;
+                }
+            }
+
+
+            /*
+             * D-PAD ABAJO:
+             *
+             * Primera pulsación:
+             * empieza a bajar.
+             *
+             * Segunda pulsación:
+             * se detiene.
+             */
+
+            if (gamepad2.dpad_down &&
+                    !dpadDownAnterior) {
+
+                if (!escalarEncendido ||
+                        !escalarReversa) {
+
+                    escalarEncendido = true;
+                    escalarReversa = true;
+
+                }
+                else {
+
+                    escalarEncendido = false;
+                }
+            }
+
+
+            dpadUpAnterior =
+                    gamepad2.dpad_up;
+
+            dpadDownAnterior =
+                    gamepad2.dpad_down;
+
+
+            if (escalarEncendido) {
+
+                if (escalarReversa) {
+
+                    escalar.setPower(-1.0);
+
+                }
+                else {
+
+                    escalar.setPower(1.0);
+                }
+
+            }
+            else {
+
+                escalar.setPower(0.0);
+            }
+
+
+            // =================================================
+            // TELEMETRIA
+            // =================================================
+
+            telemetry.addLine(
+                    "=============================="
+            );
+
+            telemetry.addLine(
+                    "          ROBOT"
+            );
+
+            telemetry.addLine(
+                    "=============================="
+            );
+
+
+            // -------------------------
+            // DRIVE
+            // -------------------------
+
+            telemetry.addData(
+                    "Drive Izq",
+                    "%.2f",
+                    potenciaIzq
+            );
+
+            telemetry.addData(
+                    "Drive Der",
+                    "%.2f",
+                    potenciaDer
+            );
+
+
+            // -------------------------
+            // IMU
+            // -------------------------
+
+            telemetry.addData(
+                    "Yaw",
+                    "%.2f grados",
+                    yaw
+            );
+
+            telemetry.addData(
+                    "Pitch",
+                    "%.2f grados",
+                    pitch
+            );
+
+            telemetry.addData(
+                    "Roll",
+                    "%.2f grados",
+                    roll
+            );
+
+            telemetry.addData(
+                    "Correccion P",
+                    "%.3f",
+                    correccionDireccion
+            );
+
+
+            // -------------------------
+            // CABALLITO
+            // -------------------------
+
+            if (pitch > PITCH_LIMITE &&
+                    adelante > 0) {
+
+                telemetry.addLine(
+                        "AVISO: PROTECCION CABALLITO"
+                );
+            }
+
+
+            // -------------------------
+            // MECANISMOS
+            // -------------------------
+
+            telemetry.addData(
+                    "Recolectora",
+                    recolectoraEncendida ?
+                            (recolectoraReversa ?
+                                    "REVERSA" :
+                                    "ADELANTE") :
+                            "APAGADA"
+            );
+
+
+            telemetry.addData(
+                    "Banda",
+                    bandaEncendida ?
+                            (bandaReversa ?
+                                    "REVERSA" :
+                                    "ADELANTE") :
+                            "APAGADA"
+            );
+
+
+            telemetry.addData(
+                    "Lanzadora Arriba",
+                    lanzadoraArribaEncendida ?
+                            "ENCENDIDA" :
+                            "APAGADA"
+            );
+
+
+            telemetry.addData(
+                    "Lanzadora Abajo",
+                    lanzadoraAbajoEncendida ?
+                            (lanzadoraAbajoReversa ?
+                                    "REVERSA" :
+                                    "ADELANTE") :
+                            "APAGADA"
+            );
+
+
+            telemetry.addData(
+                    "Escalador",
+                    escalarEncendido ?
+                            (escalarReversa ?
+                                    "BAJANDO" :
+                                    "SUBIENDO") :
+                            "APAGADO"
+            );
+
+
+            telemetry.update();
+        }
+    }
+    // =========================================================
+    // VARIABLES PARA EL TRIGGER DE LANZADORA ABAJO
+    // =========================================================
+
+    private boolean lbTriggerAnterior = false;
+}
