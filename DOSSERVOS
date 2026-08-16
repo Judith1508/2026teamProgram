@@ -1,0 +1,386 @@
+package org.firstinspires.ftc.teamcode;
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.IMU;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.VoltageSensor;
+import com.qualcomm.robotcore.util.ElapsedTime;
+import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
+import java.util.List;
+
+/**
+ * ProgramacionPrueba V5 - VERSION MINIMA
+ *
+ * FUSALMO / STEAM Maker Academy - FIRST Global Challenge 2026
+ *
+ * FILOSOFIA DE ESTA VERSION
+ * -------------------------
+ * Es el codigo ORIGINAL del equipo mas UNICAMENTE lo necesario para
+ * corregir la desviacion a la derecha. Nada mas.
+ *
+ * UN SOLO ARCHIVO. SIN DEPENDENCIAS. SIN PAQUETE util.
+ *
+ * Lo que se AGREGO respecto al original:
+ *   A1  Zona muerta en los sticks      (causa mas probable de la deriva)
+ *   A2  Curva cubica                   (control fino)
+ *   A3  TRIM_DERIVA                    (compensacion mecanica residual)
+ *   A4  Compensacion de voltaje        (una sola lectura por ciclo)
+ *   A5  Normalizacion proporcional     (en vez de recorte)
+ *   A6  Servos (x2) con movimiento ida-y-vuelta a media carrera (dpad_left)
+ *   A7  Regreso manual inmediato de ambos servos a inicial (dpad_right)
+ *
+ * Lo que se QUITO deliberadamente respecto a la V4:
+ *   - DcMotorEx           -> vuelve a DcMotor, como el original
+ *   - getCurrent()        -> 7 llamadas por ciclo, costosas en el bus Lynx
+ *   - setCurrentAlert()   -> no se usa
+ *   - LynxModule / bulk caching
+ *   - RUN_USING_ENCODER y setVelocity()
+ *   - Fusibles virtuales y presupuesto de corriente
+ *   - Telemetria pesada (de ~40 lineas a ~15)
+ *
+ * Si esta version corre estable, subimos un escalon a la vez y sabremos
+ * exactamente cual componente rompe el sistema.
+ *
+ * TODO [<<CALIBRAR>>]: ver el procedimiento en cada constante marcada.
+ */
+@TeleOp(name = "ProgramacionPrueba V5 - MINIMA")
+public class ProgramacionPruebaV5 extends LinearOpMode {
+
+    // =====================================================================
+    // CONSTANTES A CALIBRAR
+    // =====================================================================
+    /**
+     * A1 - Zona muerta. Suban este valor si el stick en reposo no marca cero.
+     * La telemetria muestra "Stick reposo" para que lo verifiquen.
+     */
+    private static final double ZONA_MUERTA = 0.05;      // <<CALIBRAR>>
+
+    /** A2 - Curva de respuesta. 1.0 = lineal, 3.0 = cubica. */
+    private static final double CURVA = 3.0;
+
+    /**
+     * A3 - Compensacion de deriva. Rango util [-0.15, +0.15].
+     *   POSITIVO -> corrige desviacion hacia la DERECHA (su caso)
+     *   NEGATIVO -> corrige desviacion hacia la IZQUIERDA
+     *
+     * Dejar en 0.0 y probar primero solo con la zona muerta. Si aun desvia,
+     * subir de 0.01 en 0.01 hasta que avance recto 3 metros.
+     * Si necesitan mas de 0.10, el problema es mecanico, no de software.
+     */
+    private static final double TRIM_DERIVA = 0.0;       // <<CALIBRAR>>
+
+    /** A4 - Voltaje de referencia para la compensacion. */
+    private static final double VOLTAJE_REF = 12.0;
+
+    /** Techo de amplificacion: evita exigir de mas a un pack debil. */
+    private static final double GANANCIA_MAX = 1.25;
+
+    // Potencias de mecanismos (identicas al codigo original)
+    private static final double POT_RECOLECTORA = 0.7;
+    private static final double POT_BANDA       = 1.0;
+
+    /**
+     * A6 - Servo: posiciones de recorrido, en rango [0.0, 1.0].
+     *
+     * SERVO_INICIAL: posicion de reposo del servo (donde arranca el OpMode
+     *                y donde vuelve al terminar el movimiento).
+     * SERVO_MEDIA:   posicion intermedia a la que debe llegar al presionar
+     *                el boton. No es necesariamente 0.5 exacto: depende de
+     *                donde este fisicamente montado el servo. Ajustar hasta
+     *                que el recorrido visual sea "la mitad" del que harian
+     *                con 0.0 -> 1.0 completo.
+     *
+     * Para calibrar: cambien SERVO_MEDIA de a 0.05 y prueben con dpad_left
+     * hasta que el brazo/mecanismo llegue exactamente a la mitad deseada.
+     */
+    private static final double SERVO_INICIAL = 0.0;     // <<CALIBRAR>>
+    private static final double SERVO_MEDIA   = 0.5;     // <<CALIBRAR>>
+
+    /**
+     * A6 - Si el segundo servo esta montado "en espejo" respecto al primero
+     * (por ejemplo, uno a cada lado de un mecanismo), puede necesitar que
+     * su recorrido vaya en sentido opuesto. Si al probar ven que gira al
+     * reves de lo esperado, usen SERVO2_INVERTIDO = true en vez de tocar
+     * el cableado, y las posiciones se recalculan solas.
+     */
+    private static final boolean SERVO2_INVERTIDO = false; // <<CALIBRAR>>
+
+    /** A6 - Tiempo que el servo se queda en SERVO_MEDIA antes de regresar. */
+    private static final double SERVO_ESPERA_S = 0.5;    // <<CALIBRAR>>
+
+    // =====================================================================
+    // HARDWARE
+    // =====================================================================
+
+    private DcMotor der, izq, banda, recolectora;
+    private DcMotor lanzadoraArriba, lanzadoraAbajo, escalar;
+    private Servo miServo, miServo2;
+    private IMU imu;
+    private VoltageSensor sensorVoltaje;
+
+    // =====================================================================
+    // ESTADO
+    // =====================================================================
+
+    private boolean recolectoraAdelante = false, recolectoraReversa = false;
+    private boolean bandaAdelante = false, bandaReversa = false;
+    private boolean lanzadoraArribaON = false;
+
+    private boolean xAnt, bAnt, aAnt, yAnt, rbAnt, dpadIzqAnt, dpadDerAnt;
+
+    private double voltaje = 12.0;
+    private double stickReposo = 0.0;
+
+    // A6 - estados posibles del servo
+    private enum EstadoServo { REPOSO, EN_MEDIA, REGRESANDO }
+    private EstadoServo estadoServo = EstadoServo.REPOSO;
+    private final ElapsedTime cronoServo = new ElapsedTime();
+
+    // =====================================================================
+    @Override
+    public void runOpMode() {
+
+        der             = hardwareMap.get(DcMotor.class, "der");
+        izq             = hardwareMap.get(DcMotor.class, "izq");
+        banda           = hardwareMap.get(DcMotor.class, "banda");
+        recolectora     = hardwareMap.get(DcMotor.class, "recolectora");
+        lanzadoraArriba = hardwareMap.get(DcMotor.class, "lanzadoraArriba");
+        lanzadoraAbajo  = hardwareMap.get(DcMotor.class, "lanzadoraAbajo");
+        escalar         = hardwareMap.get(DcMotor.class, "escalar");
+        miServo         = hardwareMap.get(Servo.class, "servo1"); // <<CALIBRAR>> nombre en la config
+        miServo2        = hardwareMap.get(Servo.class, "servo2"); // <<CALIBRAR>> nombre en la config
+
+        der.setDirection(DcMotor.Direction.REVERSE);
+        izq.setDirection(DcMotor.Direction.FORWARD);
+        banda.setDirection(DcMotor.Direction.FORWARD);
+        recolectora.setDirection(DcMotor.Direction.FORWARD);
+        lanzadoraArriba.setDirection(DcMotor.Direction.FORWARD);
+        lanzadoraAbajo.setDirection(DcMotor.Direction.FORWARD);
+        escalar.setDirection(DcMotor.Direction.FORWARD);
+
+        der.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        izq.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        banda.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        recolectora.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        escalar.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+
+        //FLOAT en lanzadoras: frenar un flywheel con BRAKE lo desgasta.
+        lanzadoraArriba.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
+        lanzadoraAbajo.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.FLOAT);
+
+        imu = hardwareMap.get(IMU.class, "imu");
+        imu.initialize(new IMU.Parameters(new RevHubOrientationOnRobot(
+                RevHubOrientationOnRobot.LogoFacingDirection.UP,
+                RevHubOrientationOnRobot.UsbFacingDirection.FORWARD)));
+
+        // A4 - Sensor de voltaje. Si no hay, se opera sin compensacion.
+        List<VoltageSensor> sensores = hardwareMap.getAll(VoltageSensor.class);
+        sensorVoltaje = sensores.isEmpty() ? null : sensores.get(0);
+
+        // A6 - los servos arrancan en su posicion inicial
+        miServo.setPosition(SERVO_INICIAL);
+        miServo2.setPosition(posServo2(SERVO_INICIAL));
+
+        telemetry.addLine("===== ROBOT LISTO - V5 MINIMA =====");
+        telemetry.addLine("1 GAMEPAD");
+        telemetry.addLine("");
+        telemetry.addLine("SUELTE LOS STICKS ANTES DE START");
+        telemetry.addData("Stick giro crudo", "%.4f", gamepad1.right_stick_x);
+        telemetry.addLine("");
+        telemetry.addLine("Presiona START");
+        telemetry.update();
+
+        waitForStart();
+
+        stickReposo = gamepad1.right_stick_x;
+        imu.resetYaw();
+
+        while (opModeIsActive()) {
+
+            // --- A4: lectura de voltaje, una sola vez por ciclo -----------
+            if (sensorVoltaje != null) {
+                double v = sensorVoltaje.getVoltage();
+                if (v > 6.0) voltaje = v;
+            }
+
+            // =============================================================
+            // DRIVETRAIN
+            // =============================================================
+
+            // A1 + A2: zona muerta y curva cubica
+            double adelante = conformar(-gamepad1.left_stick_y);
+            double giro     = conformar(gamepad1.right_stick_x);
+
+            // A3: trim, proporcional al avance y solo en linea recta
+            double trim = (Math.abs(giro) < 0.10)
+                        ? TRIM_DERIVA * Math.abs(adelante) : 0.0;
+
+            double potenciaIzq = adelante + giro - trim;
+            double potenciaDer = adelante - giro + trim;
+
+            // A5: normalizacion proporcional (preserva la relacion de giro)
+            double mayor = Math.max(Math.abs(potenciaIzq),
+                                    Math.abs(potenciaDer));
+            if (mayor > 1.0) {
+                potenciaIzq /= mayor;
+                potenciaDer /= mayor;
+            }
+
+            izq.setPower(compensar(potenciaIzq));
+            der.setPower(compensar(potenciaDer));
+
+            // =============================================================
+            // RECOLECTORA   X = adelante   B = reversa
+            // =============================================================
+
+            if (gamepad1.x && !xAnt) {
+                recolectoraAdelante = !recolectoraAdelante;
+                if (recolectoraAdelante) recolectoraReversa = false;
+            }
+            if (gamepad1.b && !bAnt) {
+                recolectoraReversa = !recolectoraReversa;
+                if (recolectoraReversa) recolectoraAdelante = false;
+            }
+            xAnt = gamepad1.x;
+            bAnt = gamepad1.b;
+
+            if (recolectoraAdelante)      recolectora.setPower(compensar(POT_RECOLECTORA));
+            else if (recolectoraReversa)  recolectora.setPower(compensar(-POT_RECOLECTORA));
+            else                          recolectora.setPower(0.0);
+
+            // =============================================================
+            // BANDA   A = adelante   Y = reversa
+            // =============================================================
+            if (gamepad1.a && !aAnt) {
+                bandaAdelante = !bandaAdelante;
+                if (bandaAdelante) bandaReversa = false;
+            }
+            if (gamepad1.y && !yAnt) {
+                bandaReversa = !bandaReversa;
+                if (bandaReversa) bandaAdelante = false;
+            }
+            aAnt = gamepad1.a;
+            yAnt = gamepad1.y;
+
+            if (bandaAdelante)      banda.setPower(compensar(POT_BANDA));
+            else if (bandaReversa)  banda.setPower(compensar(-POT_BANDA));
+            else                    banda.setPower(0.0);
+
+            // =============================================================
+            // LANZADORA ARRIBA   RB = on/off
+            // =============================================================
+
+            if (gamepad1.right_bumper && !rbAnt) {
+                lanzadoraArribaON = !lanzadoraArribaON;
+            }
+            rbAnt = gamepad1.right_bumper;
+
+            lanzadoraArriba.setPower(lanzadoraArribaON ? 1.0 : 0.0);
+
+            // =============================================================
+            // LANZADORA ABAJO   LB = reversa   L2 = adelante  (hold-to-run)
+            // =============================================================
+
+            if (gamepad1.left_bumper)             lanzadoraAbajo.setPower(-1.0);
+            else if (gamepad1.left_trigger > 0.1) lanzadoraAbajo.setPower(1.0);
+            else                                  lanzadoraAbajo.setPower(0.0);
+
+            // =============================================================
+            // ESCALADOR   D-PAD (arriba/abajo)  (hold-to-run)
+            // =============================================================
+
+            if (gamepad1.dpad_up)        escalar.setPower(1.0);
+            else if (gamepad1.dpad_down) escalar.setPower(-0.6);
+            else                         escalar.setPower(0.0);
+
+            // =============================================================
+            // A6 - SERVOS (x2)   dpad_left = ir a media carrera y volver solo
+            // =============================================================
+
+            // Disparo: solo si los servos estan en reposo y se detecta flanco
+            // de subida (para que un solo toque dispare un solo ciclo).
+            if (gamepad1.dpad_left && !dpadIzqAnt && estadoServo == EstadoServo.REPOSO) {
+                miServo.setPosition(SERVO_MEDIA);
+                miServo2.setPosition(posServo2(SERVO_MEDIA));
+                estadoServo = EstadoServo.EN_MEDIA;
+                cronoServo.reset();
+            }
+            dpadIzqAnt = gamepad1.dpad_left;
+
+            // Maquina de estados no bloqueante: espera en media y regresa.
+            if (estadoServo == EstadoServo.EN_MEDIA
+                    && cronoServo.seconds() >= SERVO_ESPERA_S) {
+                miServo.setPosition(SERVO_INICIAL);
+                miServo2.setPosition(posServo2(SERVO_INICIAL));
+                estadoServo = EstadoServo.REGRESANDO;
+                cronoServo.reset();
+            }
+
+            // Da tiempo a que los servos fisicos lleguen antes de aceptar otro
+            // disparo (mismo intervalo de espera, reutilizado).
+            if (estadoServo == EstadoServo.REGRESANDO
+                    && cronoServo.seconds() >= SERVO_ESPERA_S) {
+                estadoServo = EstadoServo.REPOSO;
+            }
+
+            // dpad_right = regreso manual e inmediato a la posicion inicial,
+            // sin importar en que estado este (cancela cualquier ciclo en curso).
+            if (gamepad1.dpad_right && !dpadDerAnt) {
+                miServo.setPosition(SERVO_INICIAL);
+                miServo2.setPosition(posServo2(SERVO_INICIAL));
+                estadoServo = EstadoServo.REPOSO;
+            }
+            dpadDerAnt = gamepad1.dpad_right;
+
+            // =============================================================
+            // TELEMETRIA - deliberadamente breve
+            // =============================================================
+
+            YawPitchRollAngles o = imu.getRobotYawPitchRollAngles();
+
+            telemetry.addData("Bateria", "%.2f V", voltaje);
+            telemetry.addData("Izq / Der", "%.2f / %.2f",
+                    potenciaIzq, potenciaDer);
+            telemetry.addData("Stick reposo", "%.4f  %s", stickReposo,
+                    Math.abs(stickReposo) > 0.01 ? "SUBA ZONA_MUERTA" : "OK");
+            telemetry.addData("Trim", "%.3f", TRIM_DERIVA);
+            telemetry.addData("Yaw", "%.1f", o.getYaw(AngleUnit.DEGREES));
+            telemetry.addData("Recolectora", recolectoraAdelante ? "ADELANTE"
+                    : recolectoraReversa ? "REVERSA" : "APAGADA");
+            telemetry.addData("Banda", bandaAdelante ? "ADELANTE"
+                    : bandaReversa ? "REVERSA" : "APAGADA");
+            telemetry.addData("Lanz arriba", lanzadoraArribaON ? "ON" : "OFF");
+            telemetry.addData("Servo", "%s (pos %.2f / %.2f)", estadoServo,
+                    miServo.getPosition(), miServo2.getPosition());
+            telemetry.update();
+        }
+    }
+
+    // =====================================================================
+    // UTILIDADES
+    // =====================================================================
+
+    /** A1 + A2: zona muerta con reescalado y curva de respuesta. */
+    private double conformar(double v) {
+        double a = Math.abs(v);
+        if (a < ZONA_MUERTA) return 0.0;
+        double escalado = (a - ZONA_MUERTA) / (1.0 - ZONA_MUERTA);
+        return Math.signum(v) * Math.pow(escalado, CURVA);
+    }
+
+    /** A4: traduce esfuerzo deseado a potencia segun el voltaje disponible. */
+    private double compensar(double potencia) {
+        if (voltaje < 6.0) return potencia;
+        double ganancia = Math.min(VOLTAJE_REF / voltaje, GANANCIA_MAX);
+        double r = potencia * ganancia;
+        return Math.max(-1.0, Math.min(1.0, r));
+    }
+
+    /** A6: espeja la posicion para el segundo servo si esta montado al reves. */
+    private double posServo2(double posicion) {
+        return SERVO2_INVERTIDO ? (1.0 - posicion) : posicion;
+    }
+}
